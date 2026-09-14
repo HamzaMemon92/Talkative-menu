@@ -1,0 +1,1 @@
+"""Ainza Restaurant AI backend."""

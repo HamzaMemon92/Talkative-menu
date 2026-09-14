@@ -1,0 +1,56 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python & Virtual environments
+.venv/
+**/.venv/
+venv/
+**/venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Large Model Weights (>100MB, cannot be stored directly on GitHub)
+models/**/*.gguf
+models/**/*.bin
+models/**/*.onnx
+models/**/*.safetensors
+models/**/*.pt
+models/**/*.pth
+*.gguf
+*.bin
+*.onnx
+*.safetensors
+
+# Logs and Caches
+*.log
+**/*.log
+tmp/
+**/tmp/
+.files/
+**/.files/
+.pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+.ruff_cache/
+**/.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE & OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

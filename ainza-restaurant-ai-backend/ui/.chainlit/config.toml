@@ -1,0 +1,35 @@
+[project]
+# Name of the project, appears in the Chainlit UI header
+name = "Ainza Restaurant AI"
+
+# If true, the UI will be read-only
+read_only = false
+
+# If true, the chat history is stored in the browser
+enable_telemetry = false
+
+[features]
+# Enables the ability to multi-select messages
+multi_select = false
+
+# Enable or disable the prompt playground
+prompt_playground = false
+
+# Allow users to upload files
+unsafe_allow_html = false
+
+[UI]
+# Name of the assistant in the chat UI
+name = "Ainza AI"
+
+# Description under the chat header
+description = "Restaurant AI test console — connected to the live Ainza backend"
+
+# Default theme for the UI: "light" or "dark"
+default_theme = "dark"
+
+# Custom CSS for branding
+# custom_css = "/public/custom.css"
+
+[meta]
+generated_by = "1.3.0"
