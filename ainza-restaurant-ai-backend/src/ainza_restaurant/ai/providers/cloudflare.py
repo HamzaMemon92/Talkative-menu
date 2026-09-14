@@ -54,9 +54,7 @@ class CloudflareToolCallingProvider:
         self._api_token: SecretStr = (
             raw_token if isinstance(raw_token, SecretStr) else SecretStr(raw_token)
         )
-        self.base_url = (
-            f"https://api.cloudflare.com/client/v4/accounts/{_account_id}/ai/v1"
-        )
+        self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{_account_id}/ai/v1"
         self.model = model or settings.cloudflare_model
         self.timeout_seconds = timeout_seconds or settings.cloudflare_timeout_seconds
         self.max_tokens = max_tokens or settings.cloudflare_max_tokens
@@ -178,6 +176,7 @@ class CloudflareToolCallingProvider:
 
 
 # ── Shared helpers ──────────────────────────────────────────────────────────────
+
 
 def _to_openai_tool(tool: dict[str, object]) -> dict[str, object]:
     return {

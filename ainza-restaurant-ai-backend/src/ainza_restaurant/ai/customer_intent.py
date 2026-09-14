@@ -8,6 +8,10 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ainza_restaurant.ai.category_roles import MenuCategoryRole
+from ainza_restaurant.ai.domain_classifier import (
+    CustomerDomainCategory,
+    get_customer_domain_classifier,
+)
 from ainza_restaurant.ai.models import AIMessage, AIModelResponse
 from ainza_restaurant.ai.providers.base import ToolCallingModelProvider
 from ainza_restaurant.ai.providers.llama_cpp import (
@@ -40,6 +44,9 @@ class CustomerIntentKind(StrEnum):
     BILL_PREVIEW = "bill_preview"
     CURRENT_TOTAL = "current_total"
     QUOTE_SELECTION = "quote_selection"
+    OUT_OF_DOMAIN = "out_of_domain"
+    RECOMMENDATION_REVISE = "recommendation_revise"
+    RECOMMENDATION_ACCEPT = "recommendation_accept"
     UNSUPPORTED = "unsupported"
 
 
@@ -89,6 +96,15 @@ class CustomerIntentPlan(BaseModel):
     offer_query: str | None = Field(default=None, max_length=200)
     reference_to_previous_result: int | None = Field(default=None, ge=1, le=20)
     needs_clarification: bool = False
+    revision_target: str | None = Field(default=None, max_length=200)
+    replacement_query: str | None = Field(default=None, max_length=200)
+    remove_target: str | None = Field(default=None, max_length=200)
+    add_query: str | None = Field(default=None, max_length=200)
+    make_cheaper: bool = False
+    dietary_filter: DietaryClassification | None = None
+    is_jain: bool = False
+    is_less_spicy: bool = False
+
     # Ordered semantic items for natural-language multi-item cart requests.
     items: list[CustomerIntentCartItem] = Field(default_factory=list, max_length=20)
 
@@ -97,6 +113,22 @@ class CustomerIntentPlan(BaseModel):
         _normalize_customer_semantic_filters(self)
         if self.needs_clarification:
             return self
+        if self.intent in {
+            CustomerIntentKind.CASUAL_CONVERSATION,
+            CustomerIntentKind.OUT_OF_DOMAIN,
+        } and any(
+            value is not None
+            for value in (
+                self.text_query,
+                self.dish_query,
+                self.quantity,
+                self.cart_item_reference,
+                self.variant_query,
+                self.offer_query,
+                self.reference_to_previous_result,
+            )
+        ):
+            raise ValueError(f"{self.intent.value} cannot include restaurant action fields")
         if self.intent == CustomerIntentKind.MENU_SEARCH:
             constraints = (
                 self.text_query,
@@ -135,19 +167,6 @@ class CustomerIntentPlan(BaseModel):
             and not self.cart_item_reference
         ):
             raise ValueError(f"{self.intent.value} requires cart_item_reference")
-        if self.intent == CustomerIntentKind.CASUAL_CONVERSATION and any(
-            value is not None
-            for value in (
-                self.text_query,
-                self.dish_query,
-                self.quantity,
-                self.cart_item_reference,
-                self.variant_query,
-                self.offer_query,
-                self.reference_to_previous_result,
-            )
-        ):
-            raise ValueError("casual_conversation cannot include restaurant action fields")
         return self
 
 
@@ -176,6 +195,13 @@ class CustomerIntentPlanner:
         self.last_discarded_field_names: tuple[str, ...] = ()
 
     async def plan(self, messages: list[AIMessage]) -> CustomerIntentPlan | None:
+        last_user = next(
+            (m.content for m in reversed(messages) if m.role == "user" and m.content), None
+        )
+        if last_user:
+            domain = get_customer_domain_classifier().classify(last_user)
+            if domain.category == CustomerDomainCategory.OUT_OF_DOMAIN:
+                return CustomerIntentPlan(intent=CustomerIntentKind.OUT_OF_DOMAIN)
         for repair in range(2):
             prompt = self._prompt(repair=repair)
             planner_messages = [AIMessage(role="system", content=prompt), *messages]
@@ -415,6 +441,22 @@ class CartItemSlots(BaseModel):
     quantity: int | None = Field(default=None, ge=1, le=99)
 
 
+class RecommendationReviseSlots(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revision_target: str | None = Field(default=None, max_length=200)
+    revision_replacement: str | None = Field(default=None, max_length=200)
+    revision_action: str | None = Field(default=None, max_length=50)
+    revision_cheaper: bool | None = None
+    dietary_classification: DietaryClassification | None = None
+    is_jain: bool | None = None
+    is_less_spicy: bool | None = None
+
+
+class RecommendationAcceptSlots(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 SLOT_MODELS: dict[CustomerIntentKind, type[BaseModel]] = {
     CustomerIntentKind.MENU_SEARCH: MenuSearchSlots,
     CustomerIntentKind.MEAL_RECOMMENDATION: MealRecommendationSlots,
@@ -423,6 +465,8 @@ SLOT_MODELS: dict[CustomerIntentKind, type[BaseModel]] = {
     CustomerIntentKind.DISH_AVAILABILITY: DishReferenceSlots,
     CustomerIntentKind.CART_UPDATE: CartItemSlots,
     CustomerIntentKind.CART_REMOVE: CartItemSlots,
+    CustomerIntentKind.RECOMMENDATION_REVISE: RecommendationReviseSlots,
+    CustomerIntentKind.RECOMMENDATION_ACCEPT: RecommendationAcceptSlots,
 }
 
 
@@ -434,6 +478,13 @@ class HierarchicalCustomerIntentPlanner:
         self.last_discarded_field_names: tuple[str, ...] = ()
 
     async def plan(self, messages: list[AIMessage]) -> CustomerIntentPlan | None:
+        last_user = next(
+            (m.content for m in reversed(messages) if m.role == "user" and m.content), None
+        )
+        if last_user:
+            domain = get_customer_domain_classifier().classify(last_user)
+            if domain.category == CustomerDomainCategory.OUT_OF_DOMAIN:
+                return CustomerIntentPlan(intent=CustomerIntentKind.OUT_OF_DOMAIN)
         classification = await self._model(
             IntentClassification,
             messages,
@@ -476,7 +527,14 @@ class HierarchicalCustomerIntentPlanner:
             response = await self._generate(
                 [AIMessage(role="system", content=prompt), *messages], model
             )
-            parsed = self._parse_model(response.message.content if response.message else "", model)
+            content = (
+                response.message.content
+                if (response.message and response.message.content)
+                else None
+            )
+            if not content:
+                continue
+            parsed = self._parse_model(content, model)
             if parsed is not None:
                 return parsed
         return None
@@ -547,6 +605,14 @@ class HierarchicalCustomerIntentPlanner:
             )
         if intent in {CustomerIntentKind.DISH_DETAIL, CustomerIntentKind.DISH_AVAILABILITY}:
             return "Extract only a dish reference or prior result index."
+        if intent == CustomerIntentKind.RECOMMENDATION_REVISE:
+            return (
+                "Extract meal recommendation revision instructions: revision_target, "
+                "revision_replacement, revision_action, revision_cheaper, dietary_classification, "
+                "is_jain, is_less_spicy."
+            )
+        if intent == CustomerIntentKind.RECOMMENDATION_ACCEPT:
+            return "Confirm and accept active meal recommendation to cart."
         return (
             "Extract only the required cart-item reference and requested quantity when applicable."
         )

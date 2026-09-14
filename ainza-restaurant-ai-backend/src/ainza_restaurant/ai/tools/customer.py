@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ainza_restaurant.ai.context import AIActorType, AIToolContext
 from ainza_restaurant.ai.customer_intent import MealRecommendationGoal
+from ainza_restaurant.ai.db_models import AIConversation
 from ainza_restaurant.ai.errors import AIToolScopeError
 from ainza_restaurant.ai.models import AIToolSafetyLevel
+from ainza_restaurant.ai.recommendation_draft import RecommendationDraft, RecommendationDraftService
 from ainza_restaurant.ai.recommendations import MealRecommendationService
 from ainza_restaurant.ai.tools.definitions import AIToolDefinition
 from ainza_restaurant.availability.service import AvailabilityService
@@ -24,6 +26,7 @@ from ainza_restaurant.domain.enums import (
     DietaryClassification,
     HalalOverride,
     ItemType,
+    PaymentMode,
     SpiceLevel,
 )
 from ainza_restaurant.ordering.schemas import (
@@ -113,6 +116,25 @@ class MealRecommendationInput(BaseModel):
             if self.budget_min > self.budget_max:
                 raise ValueError("budget_min must not exceed budget_max")
         return self
+
+
+class MealRecommendReviseInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    revision_target: str | None = None
+    replacement_query: str | None = None
+    remove_target: str | None = None
+    add_query: str | None = None
+    make_cheaper: bool = False
+    dietary_filter: DietaryClassification | None = None
+    is_jain: bool = False
+    is_less_spicy: bool = False
+
+
+class CustomerPaymentRequestInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    payment_mode: PaymentMode = PaymentMode.ONLINE
 
 
 class DishIdInput(BaseModel):
@@ -265,7 +287,7 @@ async def meal_recommend(
     session: AsyncSession, context: AIToolContext, payload: BaseModel
 ) -> dict[str, object]:
     data = cast(MealRecommendationInput, payload)
-    return await MealRecommendationService(session).recommend(
+    result = await MealRecommendationService(session).recommend(
         context.outlet_id,
         party_size=data.party_size,
         budget_min=data.budget_min,
@@ -274,6 +296,184 @@ async def meal_recommend(
         goal=data.recommendation_goal,
         excluded_dish_names=data.excluded_dish_names,
     )
+    if context.dining_session_token and result.get("items"):
+        dining_session = await session.scalar(
+            select(DiningSession).where(
+                DiningSession.public_session_token == context.dining_session_token
+            )
+        )
+        if dining_session is not None:
+            ai_conv = await session.scalar(
+                select(AIConversation)
+                .where(AIConversation.dining_session_id == dining_session.id)
+                .order_by(AIConversation.created_at.desc())
+            )
+            if ai_conv is not None:
+                raw_items = result.get("items", [])
+                menu = await CustomerMenuService(session).get_menu(context.outlet_id)
+                dish_map = {d.id: d for cat in menu.categories for d in cat.dishes}
+                dishes = [
+                    dish_map[item["dish_id"]]
+                    for item in raw_items
+                    if item.get("dish_id") in dish_map
+                ]
+                draft = RecommendationDraftService.create_draft(
+                    outlet_id=context.outlet_id,
+                    dining_session_id=dining_session.id,
+                    recommended_dishes=dishes,
+                    currency_code=str(result.get("currency_code") or "INR"),
+                    party_size=data.party_size,
+                    budget_max=data.budget_max,
+                )
+                ai_conv.pending_recommendation_interaction_json = draft.model_dump(mode="json")
+                await session.flush()
+    return result
+
+
+async def meal_recommend_revise(
+    session: AsyncSession, context: AIToolContext, payload: BaseModel
+) -> dict[str, object]:
+    data = cast(MealRecommendReviseInput, payload)
+    if not context.dining_session_token:
+        raise AIToolScopeError("dining_session_token required for recommendation revision")
+    dining_session = await session.scalar(
+        select(DiningSession).where(
+            DiningSession.public_session_token == context.dining_session_token
+        )
+    )
+    if dining_session is None:
+        raise AIToolScopeError("dining session not found")
+    ai_conv = await session.scalar(
+        select(AIConversation)
+        .where(AIConversation.dining_session_id == dining_session.id)
+        .order_by(AIConversation.created_at.desc())
+    )
+    if ai_conv is None or not ai_conv.pending_recommendation_interaction_json:
+        return {
+            "error": "no_active_recommendation",
+            "message": "No active recommendation draft found. Ask for recommendations first.",
+        }
+
+    draft = RecommendationDraft.model_validate(ai_conv.pending_recommendation_interaction_json)
+    menu = await CustomerMenuService(session).get_menu(context.outlet_id)
+    revised_draft, summary = RecommendationDraftService.revise(
+        draft,
+        menu,
+        replace_target=data.revision_target,
+        replacement_query=data.replacement_query,
+        remove_target=data.remove_target,
+        add_query=data.add_query,
+        make_cheaper=data.make_cheaper,
+        dietary_filter=data.dietary_filter,
+        is_jain=data.is_jain,
+        is_less_spicy=data.is_less_spicy,
+    )
+    ai_conv.pending_recommendation_interaction_json = revised_draft.model_dump(mode="json")
+    await session.commit()
+
+    return {
+        "summary": summary,
+        "draft_id": str(revised_draft.draft_id),
+        "total": revised_draft.total,
+        "currency_code": revised_draft.currency_code,
+        "items": [item.model_dump(mode="json") for item in revised_draft.items],
+    }
+
+
+async def meal_recommend_accept(
+    session: AsyncSession, context: AIToolContext, payload: BaseModel
+) -> dict[str, object]:
+    cast(NoArgs, payload)
+    if not context.dining_session_token:
+        raise AIToolScopeError("dining_session_token required for recommendation acceptance")
+    dining_session = await session.scalar(
+        select(DiningSession).where(
+            DiningSession.public_session_token == context.dining_session_token
+        )
+    )
+    if dining_session is None:
+        raise AIToolScopeError("dining session not found")
+    ai_conv = await session.scalar(
+        select(AIConversation)
+        .where(AIConversation.dining_session_id == dining_session.id)
+        .order_by(AIConversation.created_at.desc())
+    )
+    if ai_conv is None or not ai_conv.pending_recommendation_interaction_json:
+        return {
+            "error": "no_active_recommendation",
+            "message": "No active recommendation draft to accept.",
+        }
+
+    draft = RecommendationDraft.model_validate(ai_conv.pending_recommendation_interaction_json)
+    if draft.is_expired():
+        return {
+            "error": "draft_expired",
+            "message": "Recommendation draft has expired. Please ask for a new recommendation.",
+        }
+
+    batch_items = [
+        CartBatchAddItem(
+            dish_id=item.dish_id,
+            quantity=1,
+            requirement="required",
+        )
+        for item in draft.items
+    ]
+    batch_result = await CartService(session).add_items_batch(
+        context.dining_session_token,
+        batch_items,
+    )
+    cart = batch_result.cart
+    ai_conv.pending_recommendation_interaction_json = None
+    await session.commit()
+    return {
+        "accepted": True,
+        "message": f"Added {len(batch_items)} items from recommendation to cart.",
+        "cart_total": str(cart.subtotal_after_discount),
+        "cart_item_count": cart.quantity_count,
+        "currency_code": cart.currency_code,
+    }
+
+
+async def customer_payment_request(
+    session: AsyncSession, context: AIToolContext, payload: BaseModel
+) -> dict[str, object]:
+    from ainza_restaurant.core.config import get_settings
+
+    if not get_settings().payments_enabled:
+        raise AIToolScopeError(
+            "Online payment is currently deferred. Please settle your bill directly with "
+            "restaurant staff at your table or counter."
+        )
+    data = cast(CustomerPaymentRequestInput, payload)
+    if not context.dining_session_token:
+        raise AIToolScopeError("dining_session_token required for payment request")
+    dining_session = await session.scalar(
+        select(DiningSession).where(
+            DiningSession.public_session_token == context.dining_session_token
+        )
+    )
+    if dining_session is None:
+        raise AIToolScopeError("dining session not found")
+
+    from ainza_restaurant.payment.service import PaymentService
+
+    payment_service = PaymentService(session)
+    intent = await payment_service.create_payment_intent(
+        dining_session_id=dining_session.id,
+        payment_mode=data.payment_mode,
+        idempotency_key=f"pay_{dining_session.id}_{data.payment_mode.value}",
+    )
+    return {
+        "payment_intent_id": str(intent.id),
+        "amount": intent.amount,
+        "currency_code": intent.currency_code,
+        "status": intent.status.value,
+        "payment_mode": intent.payment_mode.value,
+        "qr_payload": intent.qr_payload,
+        "checkout_url": intent.checkout_url,
+        "expires_at": intent.expires_at.isoformat(),
+    }
 
 
 async def menu_get_dish(
@@ -675,5 +875,41 @@ CUSTOMER_TOOLS = [
         safety_level=AIToolSafetyLevel.READ_ONLY,
         requires_confirmation=False,
         handler=customer_total_summary,
+    ),
+    AIToolDefinition(
+        name="meal_recommend_revise",
+        description=(
+            "Revise an active recommendation draft by replacing, removing, adding items, "
+            "or adjusting constraints (cheaper, dietary, less spicy) without mutating cart."
+        ),
+        input_model=MealRecommendReviseInput,
+        allowed_actor_types=CUSTOMER,
+        safety_level=AIToolSafetyLevel.REVERSIBLE_MUTATION,
+        requires_confirmation=False,
+        handler=meal_recommend_revise,
+    ),
+    AIToolDefinition(
+        name="meal_recommend_accept",
+        description=(
+            "Accept the current active recommendation draft and atomically add its items "
+            "to the cart."
+        ),
+        input_model=NoArgs,
+        allowed_actor_types=CUSTOMER,
+        safety_level=AIToolSafetyLevel.REVERSIBLE_MUTATION,
+        requires_confirmation=False,
+        handler=meal_recommend_accept,
+    ),
+    AIToolDefinition(
+        name="customer_payment_request",
+        description=(
+            "Initiate payment for the finalized session bill. Returns payment intent with "
+            "mode (ONLINE, PAY_AT_TABLE, PAY_AT_COUNTER) and payment QR/checkout URL."
+        ),
+        input_model=CustomerPaymentRequestInput,
+        allowed_actor_types=CUSTOMER,
+        safety_level=AIToolSafetyLevel.REVERSIBLE_MUTATION,
+        requires_confirmation=False,
+        handler=customer_payment_request,
     ),
 ]

@@ -20,8 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ainza_restaurant.ai.context import AIActorType, AIToolContext
 from ainza_restaurant.ai.models import AIToolSafetyLevel
 from ainza_restaurant.ai.tools.definitions import AIToolDefinition
-from ainza_restaurant.dining.models import DiningSession
-from ainza_restaurant.domain.enums import DiningOrderStatus
+from ainza_restaurant.dining.models import DiningSession, RestaurantTable
 from ainza_restaurant.ordering.models import (
     DiningOrder,
     DiningOrderItem,
@@ -38,7 +37,9 @@ class AnalyticsPeriodInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     days_back: int = Field(
-        default=30, ge=1, le=90,
+        default=30,
+        ge=1,
+        le=90,
         description="Days of history to analyse (1–90, default 30)",
     )
 
@@ -86,14 +87,19 @@ def _dec(value: Any) -> str | None:
     return str(Decimal(str(value)).quantize(Decimal("0.01")))
 
 
-def _completed_orders_for_outlet(outlet_id: object, cutoff: datetime):
+def _outlet_sessions_subquery(outlet_id: object) -> Any:
+    return (
+        select(DiningSession.id)
+        .join(RestaurantTable, DiningSession.table_id == RestaurantTable.id)
+        .where(RestaurantTable.outlet_id == outlet_id)
+    )
+
+
+def _completed_orders_for_outlet(outlet_id: object, cutoff: datetime) -> tuple[Any, ...]:
     """Base subquery filter: submitted orders for this outlet after cutoff."""
     return (
-        DiningOrder.status != DiningOrderStatus.CANCELLED,
         DiningOrder.submitted_at >= cutoff,
-        DiningOrder.dining_session_id.in_(
-            select(DiningSession.id).where(DiningSession.outlet_id == outlet_id)
-        ),
+        DiningOrder.dining_session_id.in_(_outlet_sessions_subquery(outlet_id)),
     )
 
 
@@ -106,17 +112,12 @@ async def owner_orders_summary(
     """Total orders, revenue, average order value, and cancellation rate."""
     data = cast(AnalyticsPeriodInput, payload)
     cutoff = _cutoff(data.days_back)
-    outlet_sessions = select(DiningSession.id).where(
-        DiningSession.outlet_id == context.outlet_id
-    )
+    outlet_sessions = _outlet_sessions_subquery(context.outlet_id)
 
-    # All orders in period (including cancelled) for rate calculation
+    # All orders in period
     all_rows = await session.execute(
         select(
             func.count(DiningOrder.id).label("total"),
-            func.count(DiningOrder.id)
-            .filter(DiningOrder.status == DiningOrderStatus.CANCELLED)
-            .label("cancelled"),
         ).where(
             DiningOrder.submitted_at >= cutoff,
             DiningOrder.dining_session_id.in_(outlet_sessions),
@@ -124,16 +125,15 @@ async def owner_orders_summary(
     )
     all_row = all_rows.one()
     total = all_row.total or 0
-    cancelled = all_row.cancelled or 0
+    cancelled = 0
 
-    # Revenue from completed orders only
+    # Revenue from completed orders
     rev_rows = await session.execute(
         select(
             func.sum(DiningOrder.subtotal_after_discount).label("gross_revenue"),
             func.avg(DiningOrder.subtotal_after_discount).label("avg_order_value"),
         ).where(
             DiningOrder.submitted_at >= cutoff,
-            DiningOrder.status != DiningOrderStatus.CANCELLED,
             DiningOrder.dining_session_id.in_(outlet_sessions),
         )
     )
@@ -173,10 +173,7 @@ async def owner_dish_performance(
         .join(DiningOrder, DiningOrderItem.order_id == DiningOrder.id)
         .where(
             DiningOrder.submitted_at >= cutoff,
-            DiningOrder.status != DiningOrderStatus.CANCELLED,
-            DiningOrder.dining_session_id.in_(
-                select(DiningSession.id).where(DiningSession.outlet_id == context.outlet_id)
-            ),
+            DiningOrder.dining_session_id.in_(_outlet_sessions_subquery(context.outlet_id)),
         )
         .group_by(DiningOrderItem.dish_name_snapshot)
         .order_by(sort_col)
@@ -198,7 +195,7 @@ async def owner_category_mix(
     session: AsyncSession, context: AIToolContext, payload: BaseModel
 ) -> list[dict[str, Any]]:
     """Revenue and unit share by menu category for completed orders."""
-    from ainza_restaurant.menu.models import Category, Dish, DishVariant
+    from ainza_restaurant.menu.models import Category, Dish
 
     data = cast(CategoryMixInput, payload)
     cutoff = _cutoff(data.days_back)
@@ -214,10 +211,7 @@ async def owner_category_mix(
         .join(Category, Dish.category_id == Category.id)
         .where(
             DiningOrder.submitted_at >= cutoff,
-            DiningOrder.status != DiningOrderStatus.CANCELLED,
-            DiningOrder.dining_session_id.in_(
-                select(DiningSession.id).where(DiningSession.outlet_id == context.outlet_id)
-            ),
+            DiningOrder.dining_session_id.in_(_outlet_sessions_subquery(context.outlet_id)),
         )
         .group_by(Category.id, Category.name)
         .order_by(func.sum(DiningOrderItem.line_subtotal_snapshot).desc())
@@ -233,10 +227,9 @@ async def owner_category_mix(
     ]
     total_rev = sum(float(r["revenue"]) for r in results if r["revenue"] is not None)
     for r in results:
+        rev_val = r["revenue"]
         r["revenue_share_pct"] = (
-            round(float(r["revenue"]) / total_rev * 100, 1)  # type: ignore[arg-type]
-            if r["revenue"] and total_rev
-            else None
+            round(float(rev_val) / total_rev * 100, 1) if rev_val and total_rev else None
         )
 
     return results
@@ -256,10 +249,7 @@ async def owner_peak_hours(
         )
         .where(
             DiningOrder.submitted_at >= cutoff,
-            DiningOrder.status != DiningOrderStatus.CANCELLED,
-            DiningOrder.dining_session_id.in_(
-                select(DiningSession.id).where(DiningSession.outlet_id == context.outlet_id)
-            ),
+            DiningOrder.dining_session_id.in_(_outlet_sessions_subquery(context.outlet_id)),
         )
         .group_by(func.strftime("%H", DiningOrder.submitted_at))
         .order_by(func.strftime("%H", DiningOrder.submitted_at))
@@ -267,8 +257,7 @@ async def owner_peak_hours(
 
     hour_map = {int(row.hour): row.order_count for row in rows if row.hour is not None}
     return [
-        {"hour": h, "label": f"{h:02d}:00", "order_count": hour_map.get(h, 0)}
-        for h in range(24)
+        {"hour": h, "label": f"{h:02d}:00", "order_count": hour_map.get(h, 0)} for h in range(24)
     ]
 
 
@@ -288,10 +277,7 @@ async def owner_modifier_usage(
         .join(DiningOrder, DiningOrderItem.order_id == DiningOrder.id)
         .where(
             DiningOrder.submitted_at >= cutoff,
-            DiningOrder.status != DiningOrderStatus.CANCELLED,
-            DiningOrder.dining_session_id.in_(
-                select(DiningSession.id).where(DiningSession.outlet_id == context.outlet_id)
-            ),
+            DiningOrder.dining_session_id.in_(_outlet_sessions_subquery(context.outlet_id)),
         )
         .group_by(DiningOrderItemModifier.modifier_option_name_snapshot)
         .order_by(func.count(DiningOrderItemModifier.id).desc())

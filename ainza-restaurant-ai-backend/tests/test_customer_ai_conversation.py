@@ -442,9 +442,11 @@ async def test_llama_cpp_provider_request_parsing_errors_and_reasoning_strip() -
     assert captured["url"] == "http://127.0.0.1:8081/v1/chat/completions"
     payload = captured["payload"]
     assert payload["model"] == "ainza-qwen3-8b"
-    assert "tools" not in payload
-    assert "tool_choice" not in payload
-    assert "parallel_tool_calls" not in payload
+    # Fix: tools must be present even when tool_results are in-flight
+    # (the old guard that stripped tools after the first round was the compound-mutation bug)
+    assert "tools" in payload
+    assert payload["tool_choice"] == "auto"
+    assert payload["parallel_tool_calls"] is False
     assert payload["messages"][-1]["role"] == "tool"
     assert response.message is not None
     assert response.message.content == "Visible answer"
@@ -702,7 +704,13 @@ def test_llama_provider_compacts_cosmetic_tool_schema_annotations() -> None:
     }
 
 
-def test_llama_provider_omits_tools_from_tool_result_continuation() -> None:
+def test_llama_provider_includes_tools_in_tool_result_continuation() -> None:
+    """Regression: tools must be included in round 2+ (when tool_results are present).
+
+    The old guard stripped tool_schemas from the request whenever tool_results were
+    in-flight, preventing cart_update_item / cart_remove_item from ever being called
+    after cart_get. The fix: always include tool_schemas when non-empty.
+    """
     provider = LlamaCppToolCallingProvider(timeout_seconds=10, max_tokens=16)
     request = provider.build_request(
         messages=[AIMessage(role="user", content="Show the menu.")],
@@ -710,9 +718,10 @@ def test_llama_provider_omits_tools_from_tool_result_continuation() -> None:
         tool_results=[{"name": "menu_get", "content": {"ok": True}}],
     )
 
-    assert "tools" not in request
-    assert "tool_choice" not in request
-    assert "parallel_tool_calls" not in request
+    # Fix: tools MUST be present even when tool_results are in-flight
+    assert "tools" in request
+    assert request["tool_choice"] == "auto"
+    assert request["parallel_tool_calls"] is False
     assert request["messages"][-2] == {
         "role": "assistant",
         "content": None,
@@ -724,6 +733,20 @@ def test_llama_provider_omits_tools_from_tool_result_continuation() -> None:
             }
         ],
     }
+
+
+def test_llama_provider_omits_tools_when_schema_is_empty() -> None:
+    """Synthesis round: when tool_schemas=[], tools must NOT appear in the request."""
+    provider = LlamaCppToolCallingProvider(timeout_seconds=10, max_tokens=16)
+    request = provider.build_request(
+        messages=[AIMessage(role="user", content="Show the menu.")],
+        tool_schemas=[],  # synthesis round — no tools
+        tool_results=[{"name": "menu_get", "content": {"ok": True}}],
+    )
+
+    assert "tools" not in request
+    assert "tool_choice" not in request
+    assert "parallel_tool_calls" not in request
 
 
 @pytest.mark.asyncio
@@ -880,13 +903,17 @@ async def test_agentic_model_synthesizes_from_menu_search_result(
                 ]
             ),
             # Model sees tool result and synthesises
-            AIModelResponse(message=AIMessage(role="assistant", content="We have Paneer Tikka available!")),
+            AIModelResponse(
+                message=AIMessage(role="assistant", content="We have Paneer Tikka available!")
+            ),
         ]
     )
     service = CustomerAIConversationService(session, provider=provider, now=lambda: NOW)
     created = await service.create_conversation(data["dining_session"].public_session_token)
     response = await service.send_message(
-        created.conversation_token, client_message_id="search-synth", message="Find vegetarian paneer"
+        created.conversation_token,
+        client_message_id="search-synth",
+        message="Find vegetarian paneer",
     )
 
     assert response.tools_used == ["menu_search"]
@@ -911,7 +938,9 @@ async def test_agentic_cart_add_synthesized_by_model(
                     )
                 ]
             ),
-            AIModelResponse(message=AIMessage(role="assistant", content="Added Paneer Tikka to your cart!")),
+            AIModelResponse(
+                message=AIMessage(role="assistant", content="Added Paneer Tikka to your cart!")
+            ),
         ]
     )
     service = CustomerAIConversationService(session, provider=provider, now=lambda: NOW)
@@ -940,7 +969,9 @@ async def test_agentic_failed_tool_result_reaches_model(
                     AIToolCall(name="cart_add_item", arguments={})
                 ]
             ),
-            AIModelResponse(message=AIMessage(role="assistant", content="Sorry, I couldn't add that item.")),
+            AIModelResponse(
+                message=AIMessage(role="assistant", content="Sorry, I couldn't add that item.")
+            ),
         ]
     )
     service = CustomerAIConversationService(session, provider=provider, now=lambda: NOW)
@@ -954,4 +985,3 @@ async def test_agentic_failed_tool_result_reaches_model(
     assert "couldn't" in response.assistant_message
     # Should never claim success when tool failed
     assert "added" not in response.assistant_message.casefold()
-

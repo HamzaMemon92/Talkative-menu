@@ -50,6 +50,11 @@ from ainza_restaurant.domain.enums import (
 from ainza_restaurant.menu.models import Category, Dish
 from tests.test_ai_tools import NOW, customer_context, urban_tadka
 
+_LEGACY_SKIP_REASON = (
+    "Legacy intent planner service tests deprecated in favor of agentic AI conversation service"
+)
+
+
 
 @pytest.fixture
 async def session() -> AsyncSession:
@@ -257,7 +262,7 @@ async def test_hierarchical_cart_planner_preserves_multi_item_semantics_through_
                     '{"dish_query":"Veg Kolhapuri","quantity":1},'
                     '{"dish_query":"Tandoori Roti","quantity":2},'
                     '{"dish_query":"Butter Naan","quantity":1}'
-                    ']}'
+                    "]}"
                 ),
             ]
         )
@@ -308,9 +313,7 @@ async def test_hierarchical_conditional_cart_planner_selects_batch_capability(
         )
     )
 
-    plan = await planner.plan(
-        [AIMessage(role="user", content="also add buttermilk if available")]
-    )
+    plan = await planner.plan([AIMessage(role="user", content="also add buttermilk if available")])
     assert plan is not None
     assert len(plan.items) == 1
     assert plan.items[0].dish_query == "buttermilk"
@@ -345,7 +348,7 @@ async def test_hierarchical_single_cart_item_remains_canonical_and_safe(
         FixedResponseProvider(
             [
                 '{"intent":"cart_add"}',
-                '{"items":[{"dish_query":"Paneer Tikka","quantity":1}]}' ,
+                '{"items":[{"dish_query":"Paneer Tikka","quantity":1}]}',
             ]
         )
     )
@@ -391,23 +394,27 @@ async def test_pending_choice_matching_prefers_specific_typed_option(
     for options in (pending.options, list(reversed(pending.options))):
         pending.options = options
         assert (
-            service._resolve_pending_recommendation_choice(pending, "vegetarian")
-            .dietary_classification
+            service._resolve_pending_recommendation_choice(
+                pending, "vegetarian"
+            ).dietary_classification
             == DietaryClassification.VEGETARIAN
         )
         assert (
-            service._resolve_pending_recommendation_choice(pending, "non vegetarian")
-            .dietary_classification
+            service._resolve_pending_recommendation_choice(
+                pending, "non vegetarian"
+            ).dietary_classification
             == DietaryClassification.NON_VEGETARIAN
         )
         assert (
-            service._resolve_pending_recommendation_choice(pending, "I prefer non vegetarian")
-            .dietary_classification
+            service._resolve_pending_recommendation_choice(
+                pending, "I prefer non vegetarian"
+            ).dietary_classification
             == DietaryClassification.NON_VEGETARIAN
         )
         assert (
-            service._resolve_pending_recommendation_choice(pending, "no preference")
-            .dietary_classification
+            service._resolve_pending_recommendation_choice(
+                pending, "no preference"
+            ).dietary_classification
             is None
         )
 
@@ -870,10 +877,7 @@ async def test_follow_up_vegetarian_plan_does_not_filter_unknown_spice(
         FixedResponseProvider(
             [
                 '{"intent":"meal_recommendation"}',
-                (
-                    '{"dietary_classification":"vegetarian",'
-                    '"spice_level":"unknown","party_size":2}'
-                ),
+                ('{"dietary_classification":"vegetarian","spice_level":"unknown","party_size":2}'),
             ]
         )
     )
@@ -1007,7 +1011,9 @@ async def test_previous_grounded_list_reference_resolves_authoritative_order(
     assert compiled.arguments["dish_id"] == str(data["tikka"].id)
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_service_uses_typed_plan_for_grounded_tool_execution(session: AsyncSession) -> None:
     data = await urban_tadka(session)
@@ -1032,7 +1038,9 @@ async def test_service_uses_typed_plan_for_grounded_tool_execution(session: Asyn
     assert [item.action for item in response.navigation] == [AINavigationAction.BROWSE_CATEGORIES]
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_service_allows_casual_plan_without_restaurant_tool(session: AsyncSession) -> None:
     data = await urban_tadka(session)
@@ -1056,7 +1064,9 @@ async def test_service_allows_casual_plan_without_restaurant_tool(session: Async
     assert response.assistant_message == "Hello! How can I help today?"
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("answer", "expected_dish"),
@@ -1107,9 +1117,9 @@ async def test_pending_recommendation_answer_takes_priority_before_generic_menu_
     second_service = CustomerAIConversationService(
         session,
         provider=FixedResponseProvider([]),
-        intent_planner=QueuePlanner([
-            CustomerIntentPlan(intent=CustomerIntentKind.MENU_SEARCH, text_query="vegetarian")
-        ]),
+        intent_planner=QueuePlanner(
+            [CustomerIntentPlan(intent=CustomerIntentKind.MENU_SEARCH, text_query="vegetarian")]
+        ),
         now=lambda: NOW,
     )
     second = await second_service.send_message(
@@ -1125,7 +1135,9 @@ async def test_pending_recommendation_answer_takes_priority_before_generic_menu_
     assert stored.pending_recommendation_interaction_json is None
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_pending_recommendation_is_persisted_consumed_and_not_reused(
     session: AsyncSession,
@@ -1207,7 +1219,9 @@ async def test_pending_recommendation_is_persisted_consumed_and_not_reused(
     assert stored.pending_recommendation_interaction_json["base_plan"]["budget_max"] is None
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_pending_no_preference_keeps_base_constraints_only(session: AsyncSession) -> None:
     base = CustomerIntentPlan(
@@ -1229,9 +1243,7 @@ async def test_pending_no_preference_keeps_base_constraints_only(session: AsyncS
         provider=FixedResponseProvider([]),
         now=lambda: NOW,
     )
-    state = service._pending_interaction_payload(
-        base, interaction
-    )
+    state = service._pending_interaction_payload(base, interaction)
 
     merged = CustomerAIConversationService._merge_pending_recommendation(
         state,
@@ -1245,7 +1257,9 @@ async def test_pending_no_preference_keeps_base_constraints_only(session: AsyncS
     assert merged.recommendation_goal == MealRecommendationGoal.FULL_MEAL
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_expired_pending_recommendation_is_cleared_and_replanned(
     session: AsyncSession,
@@ -1302,7 +1316,9 @@ async def test_expired_pending_recommendation_is_cleared_and_replanned(
     assert conversation.pending_recommendation_interaction_json is not None
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "goal",
@@ -1349,7 +1365,9 @@ async def test_broad_meal_goals_use_authoritative_dietary_interaction(
     ]
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "goal",
@@ -1384,7 +1402,9 @@ async def test_specialized_meal_goals_skip_generic_interaction(
     assert interaction is None
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_broad_recommendation_uses_actual_category_options_when_needed(
     session: AsyncSession,
@@ -1424,7 +1444,9 @@ async def test_broad_recommendation_uses_actual_category_options_when_needed(
     }
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_constrained_recommendation_does_not_ask_follow_up(session: AsyncSession) -> None:
     data = await urban_tadka(session)
@@ -1443,7 +1465,9 @@ async def test_constrained_recommendation_does_not_ask_follow_up(session: AsyncS
     assert interaction is None
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_category_search_exposes_authoritative_browse_payload(
     session: AsyncSession,
@@ -1480,7 +1504,9 @@ async def test_category_search_exposes_authoritative_browse_payload(
     }
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_category_browse_marks_unavailable_dishes_not_addable(
     session: AsyncSession,
@@ -1520,7 +1546,9 @@ async def test_category_browse_marks_unavailable_dishes_not_addable(
     assert addability["Paneer Tikka"] is True
 
 
-@pytest.mark.skip(reason="Legacy intent planner service tests deprecated in favor of agentic AI conversation service")
+@pytest.mark.skip(
+    reason=_LEGACY_SKIP_REASON
+)
 @pytest.mark.asyncio
 async def test_successful_cart_add_exposes_authoritative_navigation(session: AsyncSession) -> None:
     data = await urban_tadka(session)

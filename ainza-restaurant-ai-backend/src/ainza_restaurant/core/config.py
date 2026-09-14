@@ -1,3 +1,4 @@
+from decimal import Decimal
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -40,6 +41,25 @@ class Settings(BaseSettings):
     ai_primary_provider: Literal["auto", "cloudflare"] = "auto"
 
     ai_confirmation_ttl_minutes: int = Field(default=15, gt=0, le=60)
+
+    # ── Cost Governor & Boundaries ───────────────────────────────────────────────
+    ai_session_rate_limit_per_minute: int = Field(default=30, gt=0, le=120)
+    ai_outlet_rate_limit_per_minute: int = Field(default=400, gt=0, le=2000)
+    ai_spam_window_seconds: int = Field(default=0, ge=0, le=30)
+    ai_session_call_budget: int = Field(default=100, gt=0, le=1000)
+    ai_outlet_daily_call_budget: int = Field(default=2000, gt=0, le=20000)
+    ai_max_clarification_loops: int = Field(default=3, ge=1, le=10)
+    ai_input_cost_per_million_tokens: Decimal = Field(default=Decimal("0.15"), ge=Decimal("0"))
+    ai_output_cost_per_million_tokens: Decimal = Field(default=Decimal("0.60"), ge=Decimal("0"))
+    ai_out_of_domain_redirect_message: str = (
+        "I'm your restaurant assistant, so I can help with food, the menu, "
+        "recommendations, your order and your bill. What are you in the mood for?"
+    )
+
+    # ── Payment settings ─────────────────────────────────────────────────────────
+    payments_enabled: bool = False
+    payment_intent_ttl_minutes: int = Field(default=30, gt=0, le=180)
+    fake_payment_webhook_secret: SecretStr = SecretStr("whsec_fake_secret_key_12345")
 
     # ── Speech-to-text (whisper.cpp — unchanged) ─────────────────────────────────
     local_stt_base_url: str = "http://127.0.0.1:8082"

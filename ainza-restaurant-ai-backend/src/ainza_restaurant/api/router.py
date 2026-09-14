@@ -10,6 +10,7 @@ from ainza_restaurant.api.routes.kitchen import router as kitchen_router
 from ainza_restaurant.api.routes.menu import router as menu_router
 from ainza_restaurant.api.routes.merchandising import router as merchandising_router
 from ainza_restaurant.api.routes.ordering import router as ordering_router
+from ainza_restaurant.api.routes.payment import router as payment_router
 from ainza_restaurant.api.routes.restaurants import router as restaurants_router
 
 api_router = APIRouter()
@@ -23,4 +24,5 @@ api_router.include_router(dining_router)
 api_router.include_router(ordering_router)
 api_router.include_router(kitchen_router)
 api_router.include_router(billing_router)
+api_router.include_router(payment_router)
 api_router.include_router(ai_router)

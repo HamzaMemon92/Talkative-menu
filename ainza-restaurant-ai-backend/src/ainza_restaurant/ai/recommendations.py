@@ -90,13 +90,18 @@ class MealRecommendationService:
             if budget_max is None or total + price <= budget_max:
                 selected.append(dish)
                 total += price
-        if goal in {
-            MealRecommendationGoal.GENERAL_RECOMMENDATION,
-            MealRecommendationGoal.BALANCED_MEAL,
-            MealRecommendationGoal.FULL_MEAL,
-        } and by_role.get(MenuCategoryRole.MAIN) and not any(
-            category_role(category_names.get(dish.category_id, "")) == MenuCategoryRole.MAIN
-            for dish in selected
+        if (
+            goal
+            in {
+                MealRecommendationGoal.GENERAL_RECOMMENDATION,
+                MealRecommendationGoal.BALANCED_MEAL,
+                MealRecommendationGoal.FULL_MEAL,
+            }
+            and by_role.get(MenuCategoryRole.MAIN)
+            and not any(
+                category_role(category_names.get(dish.category_id, "")) == MenuCategoryRole.MAIN
+                for dish in selected
+            )
         ):
             # Broad meals must not degrade into accompaniment-only suggestions.
             return []

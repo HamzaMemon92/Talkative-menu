@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ainza_restaurant.ai.context import AIActorType, AIToolContext, ToolExecutionAuthorization
+from ainza_restaurant.ai.cost_governor import get_cost_governor
 from ainza_restaurant.ai.db_models import (
     AIConversation,
     AIConversationMessage,
@@ -20,6 +21,10 @@ from ainza_restaurant.ai.db_models import (
     AIMessageStatus,
     AIPendingConfirmationStatus,
     AIPendingToolConfirmation,
+)
+from ainza_restaurant.ai.domain_classifier import (
+    CustomerDomainCategory,
+    get_customer_domain_classifier,
 )
 from ainza_restaurant.ai.errors import AIToolError
 from ainza_restaurant.ai.language import (
@@ -78,7 +83,6 @@ class AIConversationConflict(ValueError):
 
 
 class CustomerAIConversationService:
-
     def __init__(
         self,
         session: AsyncSession,
@@ -151,6 +155,23 @@ class CustomerAIConversationService:
                 "message with this client_message_id is not completed",
                 code="ai_message_not_replayable",
             )
+
+        session_key = str(conversation.dining_session_id)
+        governor = get_cost_governor()
+        allowed, reason = governor.check_rate_and_spam(
+            session_key, message, outlet_key=str(conversation.outlet_id)
+        )
+        if not allowed:
+            raise AIConversationConflict(
+                f"Rate limit exceeded: {reason}", code="ai_rate_limit_exceeded"
+            )
+        budget_allowed, budget_reason = governor.check_call_budget(
+            session_id=session_key, outlet_id=str(conversation.outlet_id)
+        )
+        if not budget_allowed:
+            raise AIConversationConflict(
+                f"Call budget exceeded: {budget_reason}", code="ai_call_budget_exceeded"
+            )
         user_message = AIConversationMessage(
             conversation_id=conversation.id,
             client_message_id=client_message_id,
@@ -168,6 +189,18 @@ class CustomerAIConversationService:
             if existing is not None:
                 return await self._stored_response_for_duplicate(conversation, existing)
             raise AIConversationConflict("duplicate message", code="ai_message_duplicate") from exc
+
+        classifier = get_customer_domain_classifier()
+        classification = classifier.classify(message)
+        if classification.category in {
+            CustomerDomainCategory.OUT_OF_DOMAIN,
+            CustomerDomainCategory.ABUSE_OR_SPAM,
+        }:
+            redirect_msg = (
+                classification.redirect_message or get_settings().ai_out_of_domain_redirect_message
+            )
+            return await self._complete_response(conversation.id, user_message, redirect_msg, [])
+
         try:
             return await self._run_agentic_loop(conversation, user_message)
         except AIToolError as exc:
@@ -182,7 +215,7 @@ class CustomerAIConversationService:
         *,
         client_message_id: str,
         message: str,
-    ):
+    ) -> AsyncIterator[str]:
         """Async generator that yields SSE-formatted event strings.
 
         Event types emitted (each line is ``data: <json>\\n\\n``):
@@ -197,7 +230,7 @@ class CustomerAIConversationService:
         """
         import json as _json
 
-        def _sse(payload: dict) -> str:
+        def _sse(payload: dict[str, object]) -> str:
             return f"data: {_json.dumps(payload, ensure_ascii=False)}\n\n"
 
         conversation = await self._conversation(conversation_token)
@@ -209,19 +242,55 @@ class CustomerAIConversationService:
             # Re-stream the stored response as a single token + done event.
             stored = await self._stored_response_for_duplicate(conversation, duplicate)
             yield _sse({"type": "token", "content": stored.assistant_message})
-            yield _sse({
-                "type": "done",
-                "assistant_message": stored.assistant_message,
-                "tools_used": stored.tools_used,
-                "confirmation_required": stored.confirmation_required.model_dump() if stored.confirmation_required else None,
-                "navigation": [n.model_dump() for n in stored.navigation],
-                "discovery": stored.discovery.model_dump() if stored.discovery else None,
-            })
+            yield _sse(
+                {
+                    "type": "done",
+                    "assistant_message": stored.assistant_message,
+                    "tools_used": stored.tools_used,
+                    "confirmation_required": stored.confirmation_required.model_dump()
+                    if stored.confirmation_required
+                    else None,
+                    "navigation": [n.model_dump() for n in stored.navigation],
+                    "discovery": stored.discovery.model_dump() if stored.discovery else None,
+                }
+            )
             return
 
         if duplicate is not None:
-            yield _sse({"type": "error", "code": "ai_message_not_replayable",
-                        "message": "message with this client_message_id is not completed"})
+            yield _sse(
+                {
+                    "type": "error",
+                    "code": "ai_message_not_replayable",
+                    "message": "message with this client_message_id is not completed",
+                }
+            )
+            return
+
+        session_key = str(conversation.dining_session_id)
+        governor = get_cost_governor()
+        allowed, reason = governor.check_rate_and_spam(
+            session_key, message, outlet_key=str(conversation.outlet_id)
+        )
+        if not allowed:
+            yield _sse(
+                {
+                    "type": "error",
+                    "code": "ai_rate_limit_exceeded",
+                    "message": f"Rate limit exceeded: {reason}",
+                }
+            )
+            return
+        budget_allowed, budget_reason = governor.check_call_budget(
+            session_id=session_key, outlet_id=str(conversation.outlet_id)
+        )
+        if not budget_allowed:
+            yield _sse(
+                {
+                    "type": "error",
+                    "code": "ai_call_budget_exceeded",
+                    "message": f"Call budget exceeded: {budget_reason}",
+                }
+            )
             return
 
         user_message = AIConversationMessage(
@@ -235,17 +304,46 @@ class CustomerAIConversationService:
         self.session.add(user_message)
         try:
             await self.session.commit()
-        except IntegrityError as exc:
+        except IntegrityError:
             await self.session.rollback()
             existing = await self._message_by_client_id(conversation.id, client_message_id)
             if existing is not None:
                 stored = await self._stored_response_for_duplicate(conversation, existing)
                 yield _sse({"type": "token", "content": stored.assistant_message})
-                yield _sse({"type": "done", "assistant_message": stored.assistant_message,
-                            "tools_used": stored.tools_used})
+                yield _sse(
+                    {
+                        "type": "done",
+                        "assistant_message": stored.assistant_message,
+                        "tools_used": stored.tools_used,
+                    }
+                )
                 return
-            yield _sse({"type": "error", "code": "ai_message_duplicate",
-                        "message": "duplicate message"})
+            yield _sse(
+                {"type": "error", "code": "ai_message_duplicate", "message": "duplicate message"}
+            )
+            return
+
+        classifier = get_customer_domain_classifier()
+        classification = classifier.classify(message)
+        if classification.category in {
+            CustomerDomainCategory.OUT_OF_DOMAIN,
+            CustomerDomainCategory.ABUSE_OR_SPAM,
+        }:
+            redirect_msg = (
+                classification.redirect_message or get_settings().ai_out_of_domain_redirect_message
+            )
+            await self._complete_response(conversation.id, user_message, redirect_msg, [])
+            yield _sse({"type": "token", "content": redirect_msg})
+            yield _sse(
+                {
+                    "type": "done",
+                    "assistant_message": redirect_msg,
+                    "tools_used": [],
+                    "confirmation_required": None,
+                    "navigation": [],
+                    "discovery": None,
+                }
+            )
             return
 
         try:
@@ -350,6 +448,8 @@ class CustomerAIConversationService:
         context = await self._tool_context(conversation)
         response_mode = await self._response_mode(conversation.id, user_message)
         tool_schemas = self.registry.get_tool_schemas(AIActorType.CUSTOMER)
+        if not get_settings().payments_enabled:
+            tool_schemas = [s for s in tool_schemas if s.get("name") != "customer_payment_request"]
         tools_used: list[str] = []
 
         # Build the initial message list (system + recent history)
@@ -389,13 +489,23 @@ class CustomerAIConversationService:
                 tools_used.append(tc.name)
 
             # Append tool call + results to in-flight context for next round
-            call_id = response.tool_calls[0].id if (response.tool_calls and response.tool_calls[0].id) else "call_1"
-            in_flight.append(AIMessage(role="assistant", content=None, tool_calls=response.tool_calls))
-            in_flight.append(AIMessage(role="tool", content=_format_tool_results(results), tool_call_id=call_id))
+            call_id = (
+                response.tool_calls[0].id
+                if (response.tool_calls and response.tool_calls[0].id)
+                else "call_1"
+            )
+            in_flight.append(
+                AIMessage(role="assistant", content=None, tool_calls=response.tool_calls)
+            )
+            in_flight.append(
+                AIMessage(role="tool", content=_format_tool_results(results), tool_call_id=call_id)
+            )
 
         # Safety guard: max rounds exhausted — ask the model for a final text answer
         fallback_response = await self.provider.generate(
-            messages=provider_messages + in_flight + [
+            messages=provider_messages
+            + in_flight
+            + [
                 AIMessage(
                     role="system",
                     content=(
@@ -419,8 +529,8 @@ class CustomerAIConversationService:
         self,
         conversation: AIConversation,
         user_message: AIConversationMessage,
-        _sse,
-    ):
+        _sse: Callable[[dict[str, object]], str],
+    ) -> AsyncIterator[str]:
         """Streaming agentic loop used by stream_message().
 
         Emits tool_start / tool_done SSE events immediately; streams the final
@@ -429,6 +539,8 @@ class CustomerAIConversationService:
         context = await self._tool_context(conversation)
         response_mode = await self._response_mode(conversation.id, user_message)
         tool_schemas = self.registry.get_tool_schemas(AIActorType.CUSTOMER)
+        if not get_settings().payments_enabled:
+            tool_schemas = [s for s in tool_schemas if s.get("name") != "customer_payment_request"]
         tools_used: list[str] = []
 
         provider_messages = await self._provider_messages(conversation.id, response_mode)
@@ -447,12 +559,14 @@ class CustomerAIConversationService:
                 if not full_text:
                     # Try streaming fallback
                     full_text = ""
-                    async for chunk in self.provider.stream_generate(
-                        messages=provider_messages + in_flight,
-                        tool_schemas=[],
-                    ):
-                        full_text += chunk
-                        yield _sse({"type": "token", "content": chunk})
+                    stream_fn = getattr(self.provider, "stream_generate", None)
+                    if callable(stream_fn):
+                        async for chunk in stream_fn(
+                            messages=provider_messages + in_flight,
+                            tool_schemas=[],
+                        ):
+                            full_text += chunk
+                            yield _sse({"type": "token", "content": chunk})
                 else:
                     yield _sse({"type": "token", "content": full_text})
 
@@ -474,14 +588,16 @@ class CustomerAIConversationService:
                         context.outlet_id, last_tool, last_args, tool_ok=True
                     )
 
-                yield _sse({
-                    "type": "done",
-                    "assistant_message": result.assistant_message,
-                    "tools_used": result.tools_used,
-                    "confirmation_required": None,
-                    "navigation": [n.model_dump() for n in navigation],
-                    "discovery": discovery.model_dump() if discovery else None,
-                })
+                yield _sse(
+                    {
+                        "type": "done",
+                        "assistant_message": result.assistant_message,
+                        "tools_used": result.tools_used,
+                        "confirmation_required": None,
+                        "navigation": [n.model_dump() for n in navigation],
+                        "discovery": discovery.model_dump() if discovery else None,
+                    }
+                )
                 return
 
             # Check for cart_submit — interrupt loop, create pending confirmation
@@ -494,14 +610,18 @@ class CustomerAIConversationService:
                     yield _sse({"type": "tool_done", "tool": "cart_submit", "ok": True})
                     conf = submit_result.confirmation_required
                     yield _sse({"type": "token", "content": submit_result.assistant_message})
-                    yield _sse({
-                        "type": "done",
-                        "assistant_message": submit_result.assistant_message,
-                        "tools_used": submit_result.tools_used,
-                        "confirmation_required": conf.model_dump() if conf else None,
-                        "navigation": [n.model_dump() for n in submit_result.navigation],
-                        "discovery": submit_result.discovery.model_dump() if submit_result.discovery else None,
-                    })
+                    yield _sse(
+                        {
+                            "type": "done",
+                            "assistant_message": submit_result.assistant_message,
+                            "tools_used": submit_result.tools_used,
+                            "confirmation_required": conf.model_dump() if conf else None,
+                            "navigation": [n.model_dump() for n in submit_result.navigation],
+                            "discovery": submit_result.discovery.model_dump()
+                            if submit_result.discovery
+                            else None,
+                        }
+                    )
                     return
 
             # Execute all tools; emit SSE events
@@ -512,19 +632,30 @@ class CustomerAIConversationService:
             results: list[AIToolResult] = await self.executor.execute_parallel(
                 self.session, tool_call_tuples, context
             )
-            for tc, tool_result in zip(response.tool_calls, results):
+            for tc, tool_result in zip(response.tool_calls, results, strict=False):
                 tools_used.append(tc.name)
                 yield _sse({"type": "tool_done", "tool": tc.name, "ok": tool_result.ok})
 
+
             # Accumulate in-flight context for next round
-            call_id = response.tool_calls[0].id if (response.tool_calls and response.tool_calls[0].id) else "call_1"
-            in_flight.append(AIMessage(role="assistant", content=None, tool_calls=response.tool_calls))
-            in_flight.append(AIMessage(role="tool", content=_format_tool_results(results), tool_call_id=call_id))
+            call_id = (
+                response.tool_calls[0].id
+                if (response.tool_calls and response.tool_calls[0].id)
+                else "call_1"
+            )
+            in_flight.append(
+                AIMessage(role="assistant", content=None, tool_calls=response.tool_calls)
+            )
+            in_flight.append(
+                AIMessage(role="tool", content=_format_tool_results(results), tool_call_id=call_id)
+            )
 
         # Safety guard: max rounds exhausted — stream a final synthesis
         full_text = ""
-        async for chunk in self.provider.stream_generate(
-            messages=provider_messages + in_flight + [
+        synth_messages = (
+            provider_messages
+            + in_flight
+            + [
                 AIMessage(
                     role="system",
                     content=(
@@ -533,24 +664,39 @@ class CustomerAIConversationService:
                         "Do not call any more tools."
                     ),
                 )
-            ],
-            tool_schemas=[],
-        ):
-            full_text += chunk
-            yield _sse({"type": "token", "content": chunk})
+            ]
+        )
+        stream_fn = getattr(self.provider, "stream_generate", None)
+        if callable(stream_fn):
+            async for chunk in stream_fn(
+                messages=synth_messages,
+                tool_schemas=[],
+            ):
+                full_text += chunk
+                yield _sse({"type": "token", "content": chunk})
+        else:
+            synth_resp = await self.provider.generate(
+                messages=synth_messages,
+                tool_schemas=[],
+            )
+            full_text = synth_resp.message.content if synth_resp.message else ""
+            if full_text:
+                yield _sse({"type": "token", "content": full_text})
 
         final_text = full_text or "I could not produce a complete response right now."
         result = await self._complete_response(
             conversation.id, user_message, final_text, tools_used
         )
-        yield _sse({
-            "type": "done",
-            "assistant_message": result.assistant_message,
-            "tools_used": result.tools_used,
-            "confirmation_required": None,
-            "navigation": [],
-            "discovery": None,
-        })
+        yield _sse(
+            {
+                "type": "done",
+                "assistant_message": result.assistant_message,
+                "tools_used": result.tools_used,
+                "confirmation_required": None,
+                "navigation": [],
+                "discovery": None,
+            }
+        )
 
     # ── DB persistence helpers ──────────────────────────────────────────────────
 
@@ -801,9 +947,22 @@ class CustomerAIConversationService:
         ]
         bounded = all_messages[-self.context_turns :]
         system_prompt = f"{CUSTOMER_SYSTEM_PROMPT}\n{response_mode_instruction(response_mode)}"
-        return [AIMessage(role="system", content=system_prompt)] + [
+        if not get_settings().payments_enabled:
+            system_prompt += (
+                "\n\nPAYMENT POLICY FOR THIS OUTLET:\n"
+                "Online digital payment is currently disabled. All payments are handled directly "
+                "by restaurant staff at the dining table or counter via cash/card terminal. "
+                "If the customer asks to pay online, politely inform them that payment is "
+                "settled in person with staff."
+            )
+
+        ai_messages = [
             AIMessage(role=message.role.value, content=message.content) for message in bounded
         ]
+        bounded_ai_messages = get_cost_governor().bound_transcript_context(
+            ai_messages, max_messages=self.context_turns
+        )
+        return [AIMessage(role="system", content=system_prompt)] + bounded_ai_messages
 
     async def _response_mode(
         self, conversation_id: object, user_message: AIConversationMessage
@@ -936,6 +1095,7 @@ class CustomerAIConversationService:
 
 # ── Module-level helpers ────────────────────────────────────────────────────────
 
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
@@ -945,6 +1105,7 @@ def _utc(value: datetime) -> datetime:
 def _format_tool_calls(tool_calls: list[AIToolCall]) -> str:
     """Serialise a list of tool calls as a compact JSON-like assistant message."""
     import json
+
     return json.dumps(
         [{"name": tc.name, "arguments": tc.arguments} for tc in tool_calls],
         ensure_ascii=False,
@@ -954,8 +1115,17 @@ def _format_tool_calls(tool_calls: list[AIToolCall]) -> str:
 def _format_tool_results(results: list[AIToolResult]) -> str:
     """Serialise tool results as a compact JSON-like tool message."""
     import json
+
     return json.dumps(
-        [{"tool": r.tool, "ok": r.ok, "data": r.data, "error": r.error.model_dump() if r.error else None} for r in results],
+        [
+            {
+                "tool": r.tool,
+                "ok": r.ok,
+                "data": r.data,
+                "error": r.error.model_dump() if r.error else None,
+            }
+            for r in results
+        ],
         ensure_ascii=False,
         default=str,
     )
@@ -964,6 +1134,7 @@ def _format_tool_results(results: list[AIToolResult]) -> str:
 def _last_args(in_flight: list[AIMessage]) -> dict[str, Any]:
     """Extract arguments from the last tool-call message in the in-flight list."""
     import json
+
     for msg in reversed(in_flight):
         if msg.role == "assistant":
             if msg.tool_calls:
@@ -1008,6 +1179,7 @@ def _build_provider() -> ToolCallingModelProvider:
         if not settings.cloudflare_enabled:
             # Misconfiguration — fall back to llama without crashing at import time.
             import logging as _logging
+
             _logging.getLogger(__name__).warning(
                 "AI_PRIMARY_PROVIDER=cloudflare but Cloudflare credentials are not set; "
                 "falling back to local/remote LLM provider."

@@ -1,6 +1,8 @@
 # ruff: noqa: B008
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -138,7 +140,8 @@ async def stream_ai_message(
 
     Clients should consume with the ``EventSource`` API or an SSE library.
     """
-    async def _generate():
+
+    async def _generate() -> AsyncIterator[str]:
         try:
             async for event in ai.stream_message(
                 conversation_token,
@@ -148,7 +151,13 @@ async def stream_ai_message(
                 yield event
         except AIConversationNotFound:
             import json as _json
-            yield f"data: {_json.dumps({'type': 'error', 'code': 'not_found', 'message': 'Conversation not found'})}\n\n"
+
+            err_payload = {
+                "type": "error",
+                "code": "not_found",
+                "message": "Conversation not found",
+            }
+            yield f"data: {_json.dumps(err_payload)}\n\n"
 
     return StreamingResponse(
         _generate(),

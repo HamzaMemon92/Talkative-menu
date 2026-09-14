@@ -60,6 +60,12 @@ class GroundedResponseRenderer:
             return self._customer_total(data)
         if tool == "menu_quote_selection" and isinstance(data, dict):
             return self._quote(data)
+        if tool == "meal_recommend_revise" and isinstance(data, dict):
+            return self._recommend_revise(data)
+        if tool == "meal_recommend_accept" and isinstance(data, dict):
+            return self._recommend_accept(data)
+        if tool == "customer_payment_request" and isinstance(data, dict):
+            return self._payment_request(data)
         return "I completed that using the restaurant data."
 
     def _menu(self, menu: dict[str, Any]) -> str:
@@ -217,3 +223,42 @@ class GroundedResponseRenderer:
             if total is not None
             else "That selection has been quoted."
         )
+
+    def _recommend_revise(self, data: dict[str, Any]) -> str:
+        if "error" in data:
+            return str(data.get("message") or "I couldn't revise the recommendation.")
+        items = data.get("items", [])
+        currency = str(data.get("currency_code") or "INR")
+        total = data.get("total", "0.00")
+        item_names = [
+            f"{item.get('name')} ({currency} {item.get('price')})"
+            for item in items
+            if isinstance(item, dict)
+        ]
+        summary = str(data.get("summary") or "Revised recommendation")
+        return f"{summary}: " + ", ".join(item_names) + f". Revised Total: {currency} {total}."
+
+    def _recommend_accept(self, data: dict[str, Any]) -> str:
+        if "error" in data:
+            return str(data.get("message") or "I couldn't accept the recommendation.")
+        currency = str(data.get("currency_code") or "INR")
+        total = data.get("cart_total", "0.00")
+        return f"Added recommended items to your cart! Current cart total: {currency} {total}."
+
+    def _payment_request(self, data: dict[str, Any]) -> str:
+        amount = data.get("amount", "0.00")
+        currency = data.get("currency_code", "INR")
+        mode = str(data.get("payment_mode", "ONLINE"))
+        if mode in {"PAY_AT_TABLE", "PAY_AT_COUNTER"}:
+            mode_label = mode.replace("_", " ").lower()
+            return (
+                f"Your payment request of {currency} {amount} via {mode_label} has been recorded. "
+                "Our staff will assist you shortly."
+            )
+        checkout_url = data.get("checkout_url")
+        extra = f" Checkout link: {checkout_url}" if checkout_url else ""
+        return (
+            f"Payment initiated for {currency} {amount}. Please scan the payment QR "
+            f"or use the checkout link to complete payment.{extra}"
+        )
+

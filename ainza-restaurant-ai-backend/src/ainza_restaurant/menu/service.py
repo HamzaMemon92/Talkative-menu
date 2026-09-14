@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, select, update
@@ -846,3 +848,191 @@ class MenuCatalogService:
         if item is None:
             raise MenuConflict("category does not belong to menu", code="ownership_error")
         return item
+
+    async def create_draft_revision(self, outlet_id: UUID) -> Menu:
+        draft = (
+            await self.session.execute(
+                select(Menu).where(Menu.outlet_id == outlet_id, Menu.status == MenuStatus.DRAFT)
+            )
+        ).scalar_one_or_none()
+        if draft is not None:
+            return draft
+
+        published = (
+            await self.session.execute(
+                select(Menu)
+                .options(
+                    selectinload(Menu.categories),
+                    selectinload(Menu.dishes).selectinload(Dish.variants),
+                )
+                .where(Menu.outlet_id == outlet_id, Menu.status == MenuStatus.PUBLISHED)
+            )
+        ).scalar_one_or_none()
+
+        outlet = await self.session.get(RestaurantOutlet, outlet_id)
+        if outlet is None:
+            raise MenuNotFound("outlet not found")
+
+        if published is None:
+            new_menu = Menu(
+                restaurant_id=outlet.restaurant_id,
+                outlet_id=outlet.id,
+                name="Main Menu (Draft)",
+                status=MenuStatus.DRAFT,
+            )
+            self.session.add(new_menu)
+            await self.session.commit()
+            await self.session.refresh(new_menu)
+            return new_menu
+
+        new_menu = Menu(
+            restaurant_id=published.restaurant_id,
+            outlet_id=published.outlet_id,
+            name=f"{published.name} (Draft)",
+            status=MenuStatus.DRAFT,
+        )
+        self.session.add(new_menu)
+        await self.session.flush()
+
+        cat_map: dict[UUID, Category] = {}
+        for old_cat in published.categories:
+            new_cat = Category(
+                menu_id=new_menu.id,
+                name=old_cat.name,
+                slug=f"{old_cat.slug}-draft",
+                display_order=old_cat.display_order,
+                is_active=old_cat.is_active,
+            )
+            self.session.add(new_cat)
+            await self.session.flush()
+            cat_map[old_cat.id] = new_cat
+
+        for old_dish in published.dishes:
+            new_dish = Dish(
+                menu_id=new_menu.id,
+                category_id=cat_map[old_dish.category_id].id
+                if old_dish.category_id in cat_map
+                else None,
+                name=old_dish.name,
+                description=old_dish.description,
+                item_type=old_dish.item_type,
+                dietary_classification=old_dish.dietary_classification,
+                spice_level=old_dish.spice_level,
+                base_price=old_dish.base_price,
+                display_order=old_dish.display_order,
+                is_active=old_dish.is_active,
+                review_status=ReviewStatus.CONFIRMED,
+            )
+            self.session.add(new_dish)
+            await self.session.flush()
+
+            for old_var in old_dish.variants:
+                new_var = DishVariant(
+                    dish_id=new_dish.id,
+                    name=old_var.name,
+                    normalized_name=old_var.normalized_name,
+                    price=old_var.price,
+                    is_active=old_var.is_active,
+                )
+                self.session.add(new_var)
+
+        await self.session.commit()
+        await self.session.refresh(new_menu)
+        return new_menu
+
+    async def preview_draft_diff(self, outlet_id: UUID) -> dict[str, Any]:
+        published = (
+            await self.session.execute(
+                select(Menu)
+                .options(selectinload(Menu.dishes))
+                .where(Menu.outlet_id == outlet_id, Menu.status == MenuStatus.PUBLISHED)
+            )
+        ).scalar_one_or_none()
+
+        draft = (
+            await self.session.execute(
+                select(Menu)
+                .options(selectinload(Menu.dishes))
+                .where(Menu.outlet_id == outlet_id, Menu.status == MenuStatus.DRAFT)
+            )
+        ).scalar_one_or_none()
+
+        if draft is None:
+            return {"has_draft": False, "changes": []}
+
+        published_dishes = {d.name.lower(): d for d in (published.dishes if published else [])}
+        draft_dishes = {d.name.lower(): d for d in draft.dishes}
+
+        changes: list[dict[str, str]] = []
+        for name_lower, draft_d in draft_dishes.items():
+            if name_lower not in published_dishes:
+                changes.append(
+                    {
+                        "action": "added_dish",
+                        "dish_name": draft_d.name,
+                        "price": str(draft_d.base_price),
+                    }
+                )
+            else:
+                pub_d = published_dishes[name_lower]
+                if pub_d.base_price != draft_d.base_price:
+                    changes.append(
+                        {
+                            "action": "price_changed",
+                            "dish_name": draft_d.name,
+                            "old_price": str(pub_d.base_price),
+                            "new_price": str(draft_d.base_price),
+                        }
+                    )
+
+        for name_lower, pub_d in published_dishes.items():
+            if name_lower not in draft_dishes:
+                changes.append(
+                    {
+                        "action": "removed_dish",
+                        "dish_name": pub_d.name,
+                    }
+                )
+
+        return {
+            "has_draft": True,
+            "draft_id": str(draft.id),
+            "changes_count": len(changes),
+            "changes": changes,
+        }
+
+    async def publish_draft_revision(self, outlet_id: UUID) -> Menu:
+        draft = (
+            await self.session.execute(
+                select(Menu).where(Menu.outlet_id == outlet_id, Menu.status == MenuStatus.DRAFT)
+            )
+        ).scalar_one_or_none()
+        if draft is None:
+            raise MenuConflict("no draft menu to publish", code="no_draft_menu")
+
+        published = (
+            await self.session.execute(
+                select(Menu).where(Menu.outlet_id == outlet_id, Menu.status == MenuStatus.PUBLISHED)
+            )
+        ).scalar_one_or_none()
+        if published is not None:
+            published.status = MenuStatus.ARCHIVED
+            await self.session.flush()
+
+        return await self.publish(draft.id, PublishRequest(confirm=True))
+
+    async def update_dish_price(self, dish_id: UUID, new_price: Decimal) -> tuple[Decimal, Decimal]:
+        dish = await self._dish(dish_id)
+        menu = await self._menu(dish.menu_id)
+        if menu.status != MenuStatus.DRAFT:
+            raise MenuConflict(
+                "Cannot mutate published menu directly. Create a draft revision first.",
+                code="published_menu_immutable",
+            )
+        old_price = dish.base_price or Decimal("0.00")
+        dish.base_price = new_price
+        await self.session.commit()
+        return old_price, new_price
+
+
+MenuService = MenuCatalogService

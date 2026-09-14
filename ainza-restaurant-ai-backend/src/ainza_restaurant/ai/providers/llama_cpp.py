@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -88,7 +88,8 @@ class LlamaCppToolCallingProvider:
                 ) from exc
             if 400 <= exc.response.status_code < 500:
                 raise AIModelProviderError(
-                    f"AI model rejected the request: {exc.response.text}", code="ai_model_invalid_request"
+                    f"AI model rejected the request: {exc.response.text}",
+                    code="ai_model_invalid_request",
                 ) from exc
             raise AIModelProviderError(
                 "AI model is unavailable", code="ai_model_unavailable"
@@ -122,7 +123,7 @@ class LlamaCppToolCallingProvider:
         messages: list[AIMessage],
         tool_schemas: list[dict[str, object]],
         tool_results: list[dict[str, object]] | None = None,
-    ):
+    ) -> AsyncIterator[str]:
         """Yield text token chunks as they arrive from the model (streaming mode).
 
         Uses the same OpenAI-compat ``/chat/completions`` endpoint with ``stream=True``.
@@ -199,7 +200,7 @@ class LlamaCppToolCallingProvider:
                                     combined = ""
                                 else:
                                     _in_think = False
-                                    combined = combined[end + len("</think>"):]
+                                    combined = combined[end + len("</think>") :]
                             else:
                                 start = combined.find("<think>")
                                 if start == -1:
@@ -208,7 +209,7 @@ class LlamaCppToolCallingProvider:
                                 else:
                                     output += combined[:start]
                                     _in_think = True
-                                    combined = combined[start + len("<think>"):]
+                                    combined = combined[start + len("<think>") :]
                         if output:
                             yield output
         except httpx.TimeoutException as exc:
@@ -290,10 +291,7 @@ class LlamaCppToolCallingProvider:
             return any(
                 isinstance(item, dict)
                 and isinstance(item.get("id"), str)
-                and (
-                    item["id"] == self.model
-                    or item["id"].removeprefix("models/") == self.model
-                )
+                and (item["id"] == self.model or item["id"].removeprefix("models/") == self.model)
                 for item in models or []
             )
         except (httpx.HTTPError, ValueError, TypeError):
@@ -323,7 +321,9 @@ class LlamaCppToolCallingProvider:
                         "type": "function",
                         "function": {
                             "name": tc.name,
-                            "arguments": json.dumps(tc.arguments) if isinstance(tc.arguments, dict) else str(tc.arguments),
+                            "arguments": json.dumps(tc.arguments)
+                            if isinstance(tc.arguments, dict)
+                            else str(tc.arguments),
                         },
                     }
                     if tc.extra_content:
@@ -360,7 +360,6 @@ class LlamaCppToolCallingProvider:
                     }
                 )
 
-        has_tool_messages = any(m.role == "tool" for m in messages) or bool(tool_results)
         request = {
             "model": self.model,
             "messages": request_messages,
@@ -368,7 +367,7 @@ class LlamaCppToolCallingProvider:
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
         }
-        if not has_tool_messages and tool_schemas:
+        if tool_schemas:
             request.update(
                 {
                     "tools": [_to_openai_tool(tool) for tool in tool_schemas],
@@ -435,4 +434,3 @@ def _strip_reasoning(content: str) -> str:
         _hidden, after = rest.split("</think>", 1)
         content = before + after
     return content.strip()
-

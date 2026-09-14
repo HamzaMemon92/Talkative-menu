@@ -656,9 +656,7 @@ async def test_v1_acceptance_contexts_are_isolated(session: AsyncSession) -> Non
     executor = AIToolExecutor(build_default_registry(), now=lambda: NOW)
     service = CustomerAIConversationService(session)
     conversation_a = await service.create_conversation(data["dining_session"].public_session_token)
-    conversation_b = await service.create_conversation(
-        data["other_session"].public_session_token
-    )
+    conversation_b = await service.create_conversation(data["other_session"].public_session_token)
     stored_a = await session.scalar(
         select(AIConversation).where(
             AIConversation.public_token == conversation_a.conversation_token
@@ -706,18 +704,26 @@ async def test_v1_acceptance_contexts_are_isolated(session: AsyncSession) -> Non
     assert isolated_cart.data["items"] == []
     assert isolated_total.ok is True
     assert isolated_total.data["state"] == "EMPTY"
-    assert await session.scalar(
-        select(func.count()).select_from(DiningOrder).where(
-            DiningOrder.dining_session_id == data["other_session"].id
+    assert (
+        await session.scalar(
+            select(func.count())
+            .select_from(DiningOrder)
+            .where(DiningOrder.dining_session_id == data["other_session"].id)
         )
-    ) == 0
+        == 0
+    )
     await session.refresh(stored_b)
     assert stored_b.pending_recommendation_interaction_json is None
-    assert await session.scalar(
-        select(func.count()).select_from(AIConversationMessage).where(
-            AIConversationMessage.conversation_id == stored_b.id
+    assert (
+        await session.scalar(
+            select(func.count())
+            .select_from(AIConversationMessage)
+            .where(AIConversationMessage.conversation_id == stored_b.id)
         )
-    ) == 0
+        == 0
+    )
+
+
 @pytest.mark.asyncio
 async def test_owner_availability_flow_and_customer_safe_availability(
     session: AsyncSession,
@@ -926,6 +932,7 @@ async def test_read_only_tools_no_mutation_provider_and_safety_audit(
         "013_billing_tax_invoice.py",
         "014_customer_ai_conversations.py",
         "015_pending_recommendation_interaction.py",
+        "016_payments_and_audit_logs.py",
     ]
     forbidden_dependencies = {
         "langchain",

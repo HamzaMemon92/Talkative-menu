@@ -136,8 +136,9 @@ class AIToolExecutor:
                 ],
                 return_exceptions=False,
             )
-            for (idx, _, _), result in zip(reads, read_results):
+            for (idx, _, _), result in zip(reads, read_results, strict=True):
                 results[idx] = result
+
 
         # Run mutations sequentially
         for idx, name, args in mutations:

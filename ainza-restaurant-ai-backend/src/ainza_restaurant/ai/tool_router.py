@@ -40,6 +40,9 @@ CUSTOMER_TOOL_CAPABILITIES: dict[str, str] = {
     "bill_get_preview": "read bill preview",
     "customer_total_summary": "read the current cart and submitted-order money state",
     "menu_quote_selection": "price a proposed selection without changing cart",
+    "meal_recommend_revise": "revise pending recommendation draft dishes or constraints",
+    "meal_recommend_accept": "accept pending recommendation draft and add items to cart",
+    "customer_payment_request": "request payment intent for table or online settlement",
 }
 
 
@@ -87,8 +90,10 @@ class CustomerToolCandidateRouter:
             tool_schemas=[],
             tool_results=[],
         )
-        content = response.message.content if response.message else ""
-        decision = self._parse_decision(content)
+        raw_content = (
+            response.message.content if (response.message and response.message.content) else None
+        )
+        decision = self._parse_decision(raw_content) if raw_content else None
         if decision is None:
             return ToolRoute(
                 needs_tools=True,
@@ -151,8 +156,11 @@ Allowed tools:
 {catalog}
 """
 
-    def _parse_decision(self, content: str) -> ToolRouteDecision | None:
+    def _parse_decision(self, content: str | None) -> ToolRouteDecision | None:
+        if not content:
+            return None
         text = content.strip()
+
         if text.startswith("```"):
             text = text.strip("`")
             if text.startswith("json"):

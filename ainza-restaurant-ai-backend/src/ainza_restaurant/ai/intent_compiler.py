@@ -41,8 +41,24 @@ class CustomerIntentPlanCompiler:
             return CompiledCustomerIntent(clarification="Could you clarify what you would like?")
         if plan.intent == CustomerIntentKind.CASUAL_CONVERSATION:
             return CompiledCustomerIntent()
-        if plan.intent == CustomerIntentKind.UNSUPPORTED:
+        if plan.intent in {CustomerIntentKind.UNSUPPORTED, CustomerIntentKind.OUT_OF_DOMAIN}:
             return CompiledCustomerIntent(unsupported=True)
+        if plan.intent == CustomerIntentKind.RECOMMENDATION_ACCEPT:
+            return CompiledCustomerIntent(tool_name="meal_recommend_accept", arguments={})
+        if plan.intent == CustomerIntentKind.RECOMMENDATION_REVISE:
+            return CompiledCustomerIntent(
+                tool_name="meal_recommend_revise",
+                arguments={
+                    "revision_target": plan.revision_target,
+                    "replacement_query": plan.replacement_query,
+                    "remove_target": plan.remove_target,
+                    "add_query": plan.add_query,
+                    "make_cheaper": plan.make_cheaper,
+                    "dietary_filter": plan.dietary_filter,
+                    "is_jain": plan.is_jain,
+                    "is_less_spicy": plan.is_less_spicy,
+                },
+            )
         simple = {
             CustomerIntentKind.MENU_OVERVIEW: "menu_get",
             CustomerIntentKind.OFFERS_GET: "offers_get_effective",

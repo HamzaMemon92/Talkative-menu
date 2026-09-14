@@ -257,3 +257,33 @@ class KitchenTicketItemStatus(StrEnum):
 
 class DiningInvoiceStatus(StrEnum):
     FINALIZED = "finalized"
+
+
+class PaymentStatus(StrEnum):
+    PENDING = "pending"
+    SUCCESS = "success"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+
+
+class PaymentMode(StrEnum):
+    ONLINE = "online"
+    PAY_AT_TABLE = "pay_at_table"
+    PAY_AT_COUNTER = "pay_at_counter"
+
+
+class PaymentAttemptStatus(StrEnum):
+    INITIATED = "initiated"
+    PROCESSING = "processing"
+    SUCCESS = "success"
+    FAILED = "failed"
+
+
+class AuditActionType(StrEnum):
+    PRICE_CHANGE = "price_change"
+    AVAILABILITY_OVERRIDE = "availability_override"
+    DISH_CREATE = "dish_create"
+    DISH_UPDATE = "dish_update"
+    MENU_PUBLISH = "menu_publish"
+    HOURS_UPDATE = "hours_update"

@@ -53,9 +53,9 @@ async def main() -> int:
             )
             cart = await CartService(session).get_cart(started.session.public_session_token)
             order_count = await session.scalar(
-                select(func.count()).select_from(DiningOrder).where(
-                    DiningOrder.dining_session_id == started.session.id
-                )
+                select(func.count())
+                .select_from(DiningOrder)
+                .where(DiningOrder.dining_session_id == started.session.id)
             )
             if cart.items or order_count != 0:
                 raise RuntimeError("fresh acceptance state could not be verified")
@@ -64,15 +64,12 @@ async def main() -> int:
                     AIConversation.public_token == conversation.conversation_token
                 )
             )
-            if (
-                stored is None
-                or stored.pending_recommendation_interaction_json is not None
-            ):
+            if stored is None or stored.pending_recommendation_interaction_json is not None:
                 raise RuntimeError("fresh AI conversation state could not be verified")
             message_count = await session.scalar(
-                select(func.count()).select_from(AIConversationMessage).where(
-                    AIConversationMessage.conversation_id == stored.id
-                )
+                select(func.count())
+                .select_from(AIConversationMessage)
+                .where(AIConversationMessage.conversation_id == stored.id)
             )
             if message_count != 0:
                 raise RuntimeError("fresh AI conversation contains messages")
